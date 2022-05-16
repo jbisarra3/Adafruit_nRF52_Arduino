@@ -1,43 +1,46 @@
 /*********************************************************************
- This is an example for our nRF52 based Bluefruit LE modules
+Sketch: bleuart_DoseCheck
+Joel Bisarra
+May 13, 2022
 
- Pick one up today in the adafruit shop!
+This sketch programs an AdaFruit Feather nRF52840 Express as a central 
+BLE device to relay commands between an EmStat Pico device and the PSTrace
+software. Note, an additional nRF52840 device is used as a peripheral to
+send and receive commands from the EmStat Pico device
 
- Adafruit invests time and resources providing this open source code,
- please support Adafruit and open-source hardware by purchasing
- products from Adafruit!
+Hardware Info:
+  Adafruit nRF52840 Express
+  
+Notes: 
+  Based on central_bleuart.ino, example code from Adafruit nRF52 Arduino
+  library. This code actsed as a central device to transfer information between the 
+  Serial port and BLE peripheral.
 
- MIT license, check LICENSE for more information
- All text above, and the splash screen below must be included in
- any redistribution
+Revision History:
+  - 13 May, 2022 -  Initial Revision from example code: Removed battery info client
+                    and Serial print statements, increase MTU size, and changed
+                    data reception loop to store all characters in a string
+                    before printing instead of printing each character individually
+                    to allow us to break up commands
 *********************************************************************/
 
-/*
- * This sketch demonstrate the central API(). A additional bluefruit
- * that has bleuart as peripheral is required for the demo.
- */
+
 #include <bluefruit.h>
 
-BLEClientBas  clientBas;  // battery client
 BLEClientDis  clientDis;  // device information client
 BLEClientUart clientUart; // bleuart client
+
 
 void setup()
 {
   Serial.begin(115200);
-//  while ( !Serial ) delay(10);   // for nrf52840 with native usb
 
-  Serial.println("Bluefruit52 Central BLEUART Example");
-  Serial.println("-----------------------------------\n");
   
   // Initialize Bluefruit with maximum connections as Peripheral = 0, Central = 1
   // SRAM usage required by SoftDevice will increase dramatically with number of connections
   Bluefruit.begin(0, 1);
   
   Bluefruit.setName("Bluefruit52 Central");
-
-  // Configure Battery client
-  clientBas.begin();  
 
   // Configure DIS client
   clientDis.begin();
@@ -75,11 +78,11 @@ void scan_callback(ble_gap_evt_adv_report_t* report)
   // Check if advertising contain BleUart service
   if ( Bluefruit.Scanner.checkReportForService(report, clientUart) )
   {
-    Serial.print("BLE UART service detected. Connecting ... ");
 
     // Connect to device with bleuart service in advertising
     Bluefruit.Central.connect(report);
-  }else
+  }
+  else
   {      
     // For Softdevice v6: after received a report, scanner will be paused
     // We need to call Scanner resume() to continue scanning
@@ -93,64 +96,34 @@ void scan_callback(ble_gap_evt_adv_report_t* report)
  */
 void connect_callback(uint16_t conn_handle)
 {
-  Serial.println("Connected");
-
-  Serial.print("Dicovering Device Information ... ");
-  if ( clientDis.discover(conn_handle) )
+  BLEConnection* conn = Bluefruit.Connection(conn_handle);
+  //Check if connection has been discovered before enabling TXD
+  if ( clientUart.discover(conn_handle) &&  clientDis.discover(conn_handle))
   {
-    Serial.println("Found it");
-    char buffer[32+1];
+    //Below snippet was used to increase the MTU of the BLE connection, which 
+    //is the maximum length of a packet of information in the BLE connection.
+    //This was done to prevent the BLE from splitting up commands into 
+    //separate packets
     
-    // read and print out Manufacturer
-    memset(buffer, 0, sizeof(buffer));
-    if ( clientDis.getManufacturer(buffer, sizeof(buffer)) )
-    {
-      Serial.print("Manufacturer: ");
-      Serial.println(buffer);
-    }
+    // request PHY changed to 2MB
+    conn->requestPHY();
 
-    // read and print out Model Number
-    memset(buffer, 0, sizeof(buffer));
-    if ( clientDis.getModel(buffer, sizeof(buffer)) )
-    {
-      Serial.print("Model: ");
-      Serial.println(buffer);
-    }
-
-    Serial.println();
-  }else
-  {
-    Serial.println("Found NONE");
-  }
-
-  Serial.print("Dicovering Battery ... ");
-  if ( clientBas.discover(conn_handle) )
-  {
-    Serial.println("Found it");
-    Serial.print("Battery level: ");
-    Serial.print(clientBas.read());
-    Serial.println("%");
-  }else
-  {
-    Serial.println("Found NONE");
-  }
-
-  Serial.print("Discovering BLE Uart Service ... ");
-  if ( clientUart.discover(conn_handle) )
-  {
-    Serial.println("Found it");
-
-    Serial.println("Enable TXD's notify");
+    // request to update data length
+    conn->requestDataLengthUpdate();
+    
+    // request mtu exchange
+    conn->requestMtuExchange(247);
+    
+    // delay a bit for all the request to complete
+    delay(1000);
+    
     clientUart.enableTXD();
-
-    Serial.println("Ready to receive from peripheral");
-  }else
+  }
+  else
   {
-    Serial.println("Found NONE");
-    
-    // disconnect since we couldn't find bleuart service
     Bluefruit.disconnect(conn_handle);
-  }  
+  }
+
 }
 
 /**
@@ -162,8 +135,6 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason)
 {
   (void) conn_handle;
   (void) reason;
-  
-  Serial.print("Disconnected, reason = 0x"); Serial.println(reason, HEX);
 }
 
 /**
@@ -172,35 +143,46 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason)
  * arrived. In this example it is clientUart
  */
 void bleuart_rx_callback(BLEClientUart& uart_svc)
-{
-  Serial.print("[RX]: ");
-  
-  while ( uart_svc.available() )
+{  
+  char ble_str[240] = {0};
+  int i = 0;
+  //Receive all characters from Peripheral and send to Serial
+  while ( uart_svc.available())
   {
-    Serial.print( (char) uart_svc.read() );
+    delay(1);
+    ble_str[i] = (char) uart_svc.read();
+    i++;
   }
-
-  Serial.println();
+  Serial.write(ble_str);
 }
 
 void loop()
 {
+  
   if ( Bluefruit.Central.connected() )
   {
-    // Not discovered yet
+     //Not discovered yet
     if ( clientUart.discovered() )
     {
-      // Discovered means in working state
-      // Get Serial input and send to Peripheral
-      if ( Serial.available() )
+      // Get single command from Serial input and send to Peripheral
+      char serial_str[240] = {0};
+      int i = 0;
+      while( Serial.available())
       {
-        delay(2); // delay a bit for all characters to arrive
+        delay(1);
+        char serial_char = (char) Serial.read();
+        serial_str[i] = serial_char;
+        i++;
         
-        char str[20+1] = { 0 };
-        Serial.readBytes(str, 20);
-        
-        clientUart.print( str );
+        //Newline separates commands in Serial input 
+        //Needed in case PSTrace sends multiple commands at once
+        if(serial_char == '\n')
+        {
+          break;
+        }
       }
+      clientUart.write(serial_str);
     }
   }
+  
 }
